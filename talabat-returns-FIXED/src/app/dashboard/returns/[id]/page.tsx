@@ -24,6 +24,7 @@ export default function ReturnDetailPage() {
   const [profile, setProfile] = useState<Profile | null>(null)
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [signedUrls, setSignedUrls] = useState<Record<string, string>>({})
   const [auditOpen, setAuditOpen] = useState(false)
   const [auditLog, setAuditLog] = useState<{ id: string; action: string; performed_at: string; performer?: { full_name?: string; email: string } }[]>([])
 
@@ -59,6 +60,19 @@ export default function ReturnDetailPage() {
       .eq('id', id)
       .single()
     setRet(data as Return)
+    if ((data as any)?.return_proofs?.length) {
+      await generateSignedUrls((data as any).return_proofs)
+    }
+  }
+  async function generateSignedUrls(proofList: Array<{ id: string; file_url: string }>) {
+    const urls: Record<string, string> = {}
+    for (const proof of proofList) {
+      const pathMatch = proof.file_url.match(/return-proofs\/(.+)/)
+      if (!pathMatch) { urls[proof.id] = proof.file_url; continue }
+      const { data } = await supabase.storage.from('return-proofs').createSignedUrl(pathMatch[1], 3600)
+      urls[proof.id] = data?.signedUrl ?? proof.file_url
+    }
+    setSignedUrls(urls)
   }
 
   useEffect(() => {
@@ -504,7 +518,7 @@ export default function ReturnDetailPage() {
                   <p className="text-xs text-gray-400">{proof.file_size ? formatFileSize(proof.file_size) : ''} · {formatDate(proof.uploaded_at)}</p>
                 </div>
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <a href={proof.file_url} target="_blank" rel="noopener noreferrer" className="p-1.5 hover:bg-gray-200 rounded text-gray-500 hover:text-brand-600 transition-colors" title="Download">
+                  <a href={signedUrls[proof.id] ?? proof.file_url} target="_blank" rel="noopener noreferrer" className="p-1.5 hover:bg-gray-200 rounded text-gray-500 hover:text-brand-600 transition-colors" title="Download">
                     <Download className="w-4 h-4" />
                   </a>
                   {canUpload && (
