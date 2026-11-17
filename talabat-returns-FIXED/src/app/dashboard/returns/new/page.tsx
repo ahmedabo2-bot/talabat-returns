@@ -88,13 +88,30 @@ export default function NewReturnPage() {
       .then((data) => {
         if (cancelled) return
         setExtracted(data)
+
+        // ââ Return header fields ââââââââââââââââââââââââââââââââââââââââââ
         if (data.returnNumber) setPortalReturnNum(data.returnNumber)
         if (data.supplierName) setSupplierName(data.supplierName)
         if (data.storeCode) {
           const matched = stores.find((s) => s.code === data.storeCode)
           if (matched) setStoreId(matched.id)
         }
-        if (data.productName || data.returnedQty || data.totalInclVat) {
+
+        // ââ SKU rows from new multi-item extraction âââââââââââââââââââââââ
+        if (data.skuItems && data.skuItems.length > 0) {
+          setSkus(data.skuItems.map((item) => ({
+            id: crypto.randomUUID(),
+            sku_code: item.skuCode || item.barcode || '',
+            sku_name: item.productName || '',
+            quantity: item.quantity || 1,
+            unit_price: item.unitCost > 0
+              ? item.unitCost.toFixed(2)
+              : item.totalAmtInclVat > 0
+                ? (item.totalAmtInclVat / (item.quantity || 1)).toFixed(2)
+                : '',
+          })))
+        } else if (data.productName || data.returnedQty || data.totalInclVat) {
+          // Fallback: single-item from legacy extraction
           setSkus([{
             id: crypto.randomUUID(),
             sku_code: data.skuCode ?? '',
@@ -105,12 +122,13 @@ export default function NewReturnPage() {
               : '',
           }])
         }
-        toast.success('Return slip auto-filled from PDF ✓')
+
+        toast.success('Return slip auto-filled from PDF â')
       })
       .catch(() => { if (!cancelled) toast.error('Could not extract data from PDF') })
       .finally(() => { if (!cancelled) setExtracting(false) })
     return () => { cancelled = true }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceFile])
 
   function addSku() {
@@ -151,7 +169,7 @@ export default function NewReturnPage() {
     if (skus.some((s) => !s.sku_name.trim())) { toast.error('All SKU rows must have a name'); return }
 
     setSubmitting(true)
-    const toastId = toast.loading('Creating return…')
+    const toastId = toast.loading('Creating returnâ¦')
 
     try {
       const { data: { user } } = await supabase.auth.getUser()
@@ -173,33 +191,23 @@ export default function NewReturnPage() {
         })
       }
 
-      // Upload source PDF if provided
-      let sourcePdfUrl: string | undefined
-      if (sourceFile) {
-        const path = `source/${user.id}/${Date.now()}-${sourceFile.name.replace(/\s+/g, '_')}`
-        const { error: srcErr } = await supabase.storage.from('return-proofs').upload(path, sourceFile)
-        if (!srcErr) {
-          const { data: srcUrl } = supabase.storage.from('return-proofs').getPublicUrl(path)
-          sourcePdfUrl = srcUrl.publicUrl
-        }
-      }
-
       const status = proofRecords.length > 0 ? 'pending_approval' : 'pending_proof'
 
-      // Create return
+      // Create return â NOTE: source_pdf_url column may not exist yet, omit it
+      const returnPayload: Record<string, unknown> = {
+        portal_return_number: portalReturnNum.trim() || generateReturnNumber(),
+        return_date: returnDate,
+        store_id: storeId,
+        supplier_name: supplierName.trim(),
+        return_reason: returnReason,
+        status,
+        notes: notes.trim() || null,
+        created_by: user.id,
+      }
+
       const { data: returnData, error: returnErr } = await supabase
         .from('returns')
-        .insert({
-          portal_return_number: portalReturnNum.trim() || generateReturnNumber(),
-          return_date: returnDate,
-          store_id: storeId,
-          supplier_name: supplierName.trim(),
-          return_reason: returnReason,
-          status,
-          notes: notes.trim() || null,
-          source_pdf_url: sourcePdfUrl ?? null,
-          created_by: user.id,
-        })
+        .insert(returnPayload)
         .select()
         .single()
 
@@ -277,7 +285,7 @@ export default function NewReturnPage() {
         {/* Return Info */}
         <div className="card p-6 space-y-4">
           <h3 className="font-semibold text-gray-900 flex items-center gap-2">
-            <span className="w-6 h-6 bg-brand-500 text-white rounded-full flex items-center justify-center text-xs font-bold">1</span>
+            <span className="w46 h-6 bg-brand-500 text-white rounded-full flex items-center justify-center text-xs font-bold">1</span>
             Return Information
           </h3>
 
@@ -286,11 +294,11 @@ export default function NewReturnPage() {
               <label className="label">Portal Return Number <span className="text-gray-400 font-normal">(optional)</span></label>
               <input
                 className="input-field"
-                placeholder="e.g. RTN-2024-001"
+                placeholder="e.g. PO3622811-001"
                 value={portalReturnNum}
                 onChange={(e) => setPortalReturnNum(e.target.value)}
               />
-              <p className="text-xs text-gray-400 mt-1">Leave blank to auto-generate</p>
+              <p className="text-xs text-gray-400 mt-1">Auto-filled from PDF or leave blank to auto-generate</p>
             </div>
             <div>
               <label className="label">Return Date <span className="text-red-500">*</span></label>
@@ -313,7 +321,7 @@ export default function NewReturnPage() {
                   onChange={(e) => setStoreId(e.target.value)}
                   disabled={profile?.role === 'store_user'}
                 >
-                  <option value="">Select store…</option>
+                  <option value="">Select storeâ¦</option>
                   {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                 </select>
               </div>
@@ -324,7 +332,7 @@ export default function NewReturnPage() {
               <input
                 list="supplier-list"
                 className="input-field"
-                placeholder="Type supplier name…"
+                placeholder="Type supplier nameâ¦"
                 value={supplierName}
                 onChange={(e) => setSupplierName(e.target.value)}
                 required
@@ -354,7 +362,7 @@ export default function NewReturnPage() {
                 value={returnReason}
                 onChange={(e) => setReturnReason(e.target.value)}
               >
-                <option value="">Select reason…</option>
+                <option value="">Select reasonâ¦</option>
                 {RETURN_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
@@ -365,7 +373,7 @@ export default function NewReturnPage() {
             <textarea
               className="input-field resize-none"
               rows={3}
-              placeholder="Any additional notes about this return…"
+              placeholder="Any additional notes about this returnâ¦"
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
             />
@@ -383,12 +391,12 @@ export default function NewReturnPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100">
-                  <th className="text-left pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide">SKU Code</th>
+                  <th className="text-left pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide">SKU / Barcode</th>
                   <th className="text-left pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide">Item Name *</th>
                   <th className="text-left pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide w-20">Qty</th>
                   <th className="text-left pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide w-28">Unit Price (EGP)</th>
                   <th className="text-right pb-2 font-medium text-gray-600 text-xs uppercase tracking-wide w-24">Total</th>
-                  <th className="w-10" />
+                  <th className="w410" />
                 </tr>
               </thead>
               <tbody className="space-y-2">
@@ -397,7 +405,7 @@ export default function NewReturnPage() {
                   return (
                     <tr key={sku.id} className="border-b border-gray-50">
                       <td className="py-2 pr-2">
-                        <input className="input-field text-xs" placeholder="SKU-001" value={sku.sku_code} onChange={(e) => updateSku(sku.id, 'sku_code', e.target.value)} />
+                        <input className="input-field text-xs" placeholder="SKU or Barcode" value={sku.sku_code} onChange={(e) => updateSku(sku.id, 'sku_code', e.target.value)} />
                       </td>
                       <td className="py-2 pr-2">
                         <input className="input-field text-xs" placeholder="Product name" required value={sku.sku_name} onChange={(e) => updateSku(sku.id, 'sku_name', e.target.value)} />
@@ -409,7 +417,7 @@ export default function NewReturnPage() {
                         <input type="number" min="0" step="0.01" className="input-field text-xs" placeholder="0.00" value={sku.unit_price} onChange={(e) => updateSku(sku.id, 'unit_price', e.target.value)} />
                       </td>
                       <td className="py-2 text-right text-gray-700 font-medium text-xs">
-                        {total > 0 ? `EGP ${total.toFixed(2)}` : '—'}
+                        {total > 0 ? `EGP ${total.toFixed(2)}` : 'â'}
                       </td>
                       <td className="py-2 pl-2">
                         <button type="button" onClick={() => removeSku(sku.id)} disabled={skus.length === 1} className="text-gray-300 hover:text-red-400 disabled:opacity-20 transition-colors p-1">
@@ -437,13 +445,15 @@ export default function NewReturnPage() {
           </button>
         </div>
 
-        {/* Source Document */}
+        {/* Source Document â upload FIRST for auto-fill */}
         <div className="card p-6 space-y-4">
           <h3 className="font-semibold text-gray-900 flex items-center gap-2">
             <span className="w-6 h-6 bg-gray-200 text-gray-600 rounded-full flex items-center justify-center text-xs font-bold">3</span>
             Portal Source Document <span className="text-xs font-normal text-gray-400 ml-1">(optional)</span>
           </h3>
-          <p className="text-sm text-gray-500">If you downloaded a PDF from the Talabat portal, attach it here.</p>
+          <p className="text-sm text-gray-500">
+            Upload the PDF from the Talabat portal â it will <strong>auto-fill</strong> the return number, supplier, store and SKU details above.
+          </p>
 
           {sourceFile ? (
             <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg">
@@ -466,13 +476,20 @@ export default function NewReturnPage() {
           {sourceFile && extracting && (
             <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-sm">
               <Loader2 className="w-4 h-4 animate-spin" />
-              Extracting data from PDF…
+              Extracting data from PDFâ¦
             </div>
           )}
           {sourceFile && extracted && !extracting && (
             <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
               <span className="font-medium">Auto-filled from PDF:</span>{' '}
-              {[extracted.returnNumber, extracted.supplierName, extracted.productName].filter(Boolean).join(' · ')}
+              {[
+                extracted.returnNumber,
+                extracted.supplierName,
+                extracted.skuItems?.[0]?.productName || extracted.productName,
+              ].filter(Boolean).join(' Â· ')}
+              {extracted.skuItems && extracted.skuItems.length > 1 && (
+                <span className="ml-1 text-green-600">({extracted.skuItems.length} items)</span>
+              )}
             </div>
           )}
           <input ref={sourceInputRef} type="file" accept=".pdf,.png,.jpg,.jpeg" className="hidden" onChange={(e) => setSourceFile(e.target.files?.[0] ?? null)} />
@@ -538,7 +555,7 @@ export default function NewReturnPage() {
           </button>
           <button type="submit" disabled={submitting} className="btn-primary">
             {submitting ? (
-              <><Loader2 className="w-4 h-4 animate-spin" /> Creating…</>
+              <><Loader2 className="w-4 h-4 animate-spin" /> Creatingâ¦</>
             ) : proofFiles.length > 0 ? (
               'Submit for Approval'
             ) : (
