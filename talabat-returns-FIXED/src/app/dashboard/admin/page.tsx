@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Plus, Trash2, Edit2, Check, X, Upload, Download,
-  Loader2, Building2, Users, Settings, FileSpreadsheet, ShieldAlert,
+  Loader2, Building2, Users, Settings, FileSpreadsheet, ShieldAlert, UserCheck,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import Papa from 'papaparse'
@@ -84,48 +84,113 @@ export default function AdminPage() {
 function StoresTab() {
   const supabase = createClient()
   const [stores, setStores] = useState<Store[]>([])
+  const [managers, setManagers] = useState<Profile[]>([])
+  // storeId → managerId[]
+  const [storeManagers, setStoreManagers] = useState<Record<string, string[]>>({})
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
-  const [form, setForm] = useState({ name: '', code: '', city: '' })
+  const [form, setForm] = useState({ name: '', code: '', city: '', managerId: '' })
   const [saving, setSaving] = useState(false)
 
-  async function fetchStores() {
-    const { data } = await supabase.from('stores').select('*').order('name')
-    setStores(data ?? [])
+  async function fetchData() {
+    const [
+      { data: storeData },
+      { data: mgrData },
+      { data: assignData },
+    ] = await Promise.all([
+      supabase.from('stores').select('*').order('name'),
+      supabase.from('profiles').select('id, full_name, email').eq('role', 'area_manager').order('full_name'),
+      supabase.from('manager_store_assignments').select('manager_id, store_id'),
+    ])
+    setStores(storeData ?? [])
+    setManagers(mgrData ?? [])
+    // Build storeId → managerIds[]
+    const map: Record<string, string[]> = {}
+    for (const a of (assignData ?? [])) {
+      if (!map[a.store_id]) map[a.store_id] = []
+      map[a.store_id].push(a.manager_id)
+    }
+    setStoreManagers(map)
     setLoading(false)
   }
-  useEffect(() => { fetchStores() }, [])
+
+  useEffect(() => { fetchData() }, [])
+
+  function getManagerName(managerId: string) {
+    const m = managers.find(x => x.id === managerId)
+    if (!m) return '—'
+    return (m as Profile & { full_name?: string }).full_name || m.email.split('@')[0]
+  }
+
+  function getStoreManagerLabel(storeId: string) {
+    const ids = storeManagers[storeId] ?? []
+    if (ids.length === 0) return { label: '—', extra: '' }
+    const first = getManagerName(ids[0])
+    const extra = ids.length > 1 ? ` +${ids.length - 1}` : ''
+    return { label: first, extra }
+  }
 
   async function handleSave() {
     if (!form.name.trim() || !form.code.trim()) { toast.error('Name and code are required'); return }
     setSaving(true)
+
+    let savedStoreId: string | null = editId
+
     if (editId) {
-      const { error } = await supabase.from('stores').update({ name: form.name, code: form.code.toUpperCase(), city: form.city || null }).eq('id', editId)
+      const { error } = await supabase
+        .from('stores')
+        .update({ name: form.name, code: form.code.toUpperCase(), city: form.city || null })
+        .eq('id', editId)
       if (error) { toast.error(error.message); setSaving(false); return }
       toast.success('Store updated')
       setEditId(null)
     } else {
-      const { error } = await supabase.from('stores').insert({ name: form.name, code: form.code.toUpperCase(), city: form.city || null })
+      const { data, error } = await supabase
+        .from('stores')
+        .insert({ name: form.name, code: form.code.toUpperCase(), city: form.city || null })
+        .select()
+        .single()
       if (error) { toast.error(error.message); setSaving(false); return }
+      savedStoreId = data.id
       toast.success('Store added')
       setShowAdd(false)
     }
-    setForm({ name: '', code: '', city: '' })
+
+    // Update manager assignment for this store
+    if (savedStoreId) {
+      // Remove all existing assignments for this store
+      await supabase.from('manager_store_assignments').delete().eq('store_id', savedStoreId)
+      // Add new assignment if a manager was selected
+      if (form.managerId) {
+        await supabase.from('manager_store_assignments').insert({
+          manager_id: form.managerId,
+          store_id: savedStoreId,
+        })
+      }
+    }
+
+    setForm({ name: '', code: '', city: '', managerId: '' })
     setSaving(false)
-    fetchStores()
+    fetchData()
   }
 
   async function handleDelete(id: string) {
     if (!confirm('Delete this store? This cannot be undone.')) return
     const { error } = await supabase.from('stores').delete().eq('id', id)
     if (error) toast.error(error.message)
-    else { toast.success('Store deleted'); fetchStores() }
+    else { toast.success('Store deleted'); fetchData() }
   }
 
   function startEdit(store: Store) {
     setEditId(store.id)
-    setForm({ name: store.name, code: store.code, city: store.city ?? '' })
+    const currentManagerIds = storeManagers[store.id] ?? []
+    setForm({
+      name: store.name,
+      code: store.code,
+      city: store.city ?? '',
+      managerId: currentManagerIds[0] ?? '',
+    })
     setShowAdd(false)
   }
 
@@ -134,26 +199,64 @@ function StoresTab() {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
-        <button onClick={() => { setShowAdd(true); setEditId(null); setForm({ name: '', code: '', city: '' }) }} className="btn-primary text-sm py-2">
+        <button
+          onClick={() => { setShowAdd(true); setEditId(null); setForm({ name: '', code: '', city: '', managerId: '' }) }}
+          className="btn-primary text-sm py-2"
+        >
           <Plus className="w-4 h-4" /> Add Store
         </button>
       </div>
 
-      {(showAdd || editId) && (
+      y(showAdd || editId) && (
         <div className="card p-5 space-y-4 border-brand-200">
           <h3 className="font-semibold text-gray-900">{editId ? 'Edit Store' : 'Add New Store'}</h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="label">Store Name *</label>
-              <input className="input-field" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Talabat Mart - Maadi" />
+              <input
+                className="input-field"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="Talabat Mart - Maadi"
+              />
             </div>
             <div>
               <label className="label">Store Code *</label>
-              <input className="input-field uppercase" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="TM-MAADI" />
+              <input
+                className="input-field uppercase"
+                value={form.code}
+                onChange={(e) => setForm({ ...form, code: e.target.value })}
+                placeholder="EG_Cairo_DS_1"
+              />
             </div>
             <div>
               <label className="label">City</label>
-              <input className="input-field" value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} placeholder="Cairo" />
+              <input
+                className="input-field"
+                value={form.city}
+                onChange={(e) => setForm({ ...form, city: e.target.value })}
+                placeholder="Cairo"
+              />
+            </div>
+            <div>
+              <label className="label flex items-center gap-1">
+                <UserCheck className="w-3.5 h-3.5" /> Area Manager
+              </label>
+              <select
+                className="input-field"
+                value={form.managerId}
+                onChange={(e) => setForm({ ...form, managerId: e.target.value })}
+              >
+                <option value="">— Unassigned —</option>
+                {managers.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {(m as Profile & { full_name?: string }).full_name || m.email.split('@')[0]} ({m.email})
+                  </option>
+                ))}
+              </select>
+              {managers.length === 0 && (
+                <p className="text-xs text-amber-600 mt-1">No area managers yet. Add them in the Area Managers tab.</p>
+              )}
             </div>
           </div>
           <div className="flex gap-2">
@@ -172,33 +275,58 @@ function StoresTab() {
         {stores.length === 0 ? (
           <div className="p-12 text-center text-gray-400">No stores yet. Add one above.</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 bg-gray-50/60">
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Code</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Name</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase hidden md:table-cell">City</th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {stores.map((s) => (
-                <tr key={s.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">{s.code}</td>
-                  <td className="px-4 py-3 font-medium text-gray-800">{s.name}</td>
-                  <td className="px-4 py-3 text-gray-500 hidden md:table-cell">{s.city ?? '—'}</td>
-                  <td className="px-4 py-3 text-right flex items-center justify-end gap-1">
-                    <button onClick={() => startEdit(s)} className="p-1.5 hover:bg-blue-50 rounded text-gray-400 hover:text-blue-500 transition-colors">
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button onClick={() => handleDelete(s.id)} className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 transition-colors">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </td>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-100 bg-gray-50/60">
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Code</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Name</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase hidden md:table-cell">City</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase hidden lg:table-cell">
+                    <span className="flex items-center gap-1"><UserCheck className="w-3.5 h-3.5" /> Area Manager</span>
+                  </th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {stores.map((s) => {
+                  const { label, extra } = getStoreManagerLabel(s.id)
+                  return (
+                    <tr key={s.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
+                      <td className="px-4 py-3 font-mono text-xs text-gray-600">{s.code}</td>
+                      <td className="px-4 py-3 font-medium text-gray-800">{s.name}</td>
+                      <td className="px-4 py-3 text-gray-500 hidden md:table-cell">{s.city ?? '—'}</td>
+                      <td className="px-4 py-3 hidden lg:table-cell">
+                        {label === '—' ? (
+                          <span className="text-gray-400 italic text-xs">Unassigned</span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs text-brand-700 bg-brand-50 px-2 py-0.5 rounded-full font-medium">
+                            <UserCheck className="w-3 h-3" />
+                            {label}
+                            {extra && <span className="text-brand-500">{extra}</span>}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => startEdit(s)}
+                          className="p-1.5 hover:bg-blue-50 rounded text-gray-400 hover:text-blue-500 transition-colors"
+                        >
+                          <Edit2 className="w-4 h-4" />
+                        </button>
+                        <button
+                          onClick={() => handleDelete(s.id)}
+                          className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
@@ -215,7 +343,6 @@ function ManagersTab() {
   const [form, setForm] = useState({ email: '', full_name: '' })
   const [saving, setSaving] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [assignmentChanges, setAssignmentChanges] = useState<Record<string, Set<string>>>({})
 
   async function fetchData() {
     const [{ data: mgrs }, { data: storeList }] = await Promise.all([
@@ -231,15 +358,20 @@ function ManagersTab() {
   async function handleAddManager() {
     if (!form.email.trim()) { toast.error('Email required'); return }
     setSaving(true)
-    // Invite user via admin - note: requires supabase admin API in real usage
-    // For now, check if user exists in profiles
-    const { data: existing } = await supabase.from('profiles').select('id').eq('email', form.email.trim().toLowerCase()).single()
+    const { data: existing } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('email', form.email.trim().toLowerCase())
+      .single()
     if (!existing) {
-      toast.error('User not found. They must sign up first, then you can set their role here.')
+      toast.error('User not found. They must sign in once first (via magic link), then you can assign them here.')
       setSaving(false)
       return
     }
-    const { error } = await supabase.from('profiles').update({ role: 'area_manager', full_name: form.full_name || null }).eq('id', existing.id)
+    const { error } = await supabase
+      .from('profiles')
+      .update({ role: 'area_manager', full_name: form.full_name || null })
+      .eq('id', existing.id)
     if (error) { toast.error(error.message); setSaving(false); return }
     toast.success('Manager role assigned!')
     setShowAdd(false)
@@ -278,29 +410,46 @@ function ManagersTab() {
       {showAdd && (
         <div className="card p-5 space-y-4">
           <h3 className="font-semibold text-gray-900">Assign Manager Role</h3>
-          <p className="text-sm text-gray-500">The user must already have an account. Enter their email to assign the manager role.</p>
+          <p className="text-sm text-gray-500">
+            The user must have signed in at least once. Enter their email to assign the manager role.
+          </p>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="label">User Email *</label>
-              <input type="email" className="input-field" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="manager@example.com" />
+              <input
+                type="email"
+                className="input-field"
+                value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })}
+                placeholder="manager@talabat.com"
+              />
             </div>
             <div>
               <label className="label">Display Name</label>
-              <input className="input-field" value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} placeholder="Sara Manager" />
+              <input
+                className="input-field"
+                value={form.full_name}
+                onChange={(e) => setForm({ ...form, full_name: e.target.value })}
+                placeholder="Sara Manager"
+              />
             </div>
           </div>
           <div className="flex gap-2">
             <button onClick={handleAddManager} disabled={saving} className="btn-primary text-sm py-2">
               {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Assign Role
             </button>
-            <button onClick={() => setShowAdd(false)} className="btn-secondary text-sm py-2"><X className="w-4 h-4" /> Cancel</button>
+            <button onClick={() => setShowAdd(false)} className="btn-secondary text-sm py-2">
+              <X className="w-4 h-4" /> Cancel
+            </button>
           </div>
         </div>
       )}
 
       <div className="card overflow-hidden">
         {managers.length === 0 ? (
-          <div className="p-12 text-center text-gray-400">No area managers yet.</div>
+          <div className="p-12 text-center text-gray-400">
+            No area managers yet. Area managers appear here after they sign in for the first time.
+          </div>
         ) : (
           <table className="w-full text-sm">
             <thead>
@@ -318,20 +467,30 @@ function ManagersTab() {
                 return (
                   <>
                     <tr key={m.id} className="border-b border-gray-50">
-                      <td className="px-4 py-3 font-medium text-gray-800">{m.full_name ?? '—'}</td>
+                      <td className="px-4 py-3 font-medium text-gray-800">
+                        {(m as Profile & { full_name?: string }).full_name ?? '—'}
+                      </td>
                       <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">{m.email}</td>
                       <td className="px-4 py-3 text-gray-600">
                         {assigned.length === 0 ? (
                           <span className="text-gray-400 italic text-xs">No stores assigned</span>
                         ) : (
-                          <span className="text-xs">{assigned.map((s) => (s as Store).name).join(', ')}</span>
+                          <span className="text-xs">
+                            {assigned.map((s) => (s as Store).name).join(', ')}
+                          </span>
                         )}
                       </td>
                       <td className="px-4 py-3 text-right flex items-center justify-end gap-1">
-                        <button onClick={() => setExpandedId(isExpanded ? null : m.id)} className="text-xs text-brand-500 hover:text-brand-700 px-2 py-1 rounded hover:bg-brand-50">
+                        <button
+                          onClick={() => setExpandedId(isExpanded ? null : m.id)}
+                          className="text-xs text-brand-500 hover:text-brand-700 px-2 py-1 rounded hover:bg-brand-50"
+  {                     >
                           {isExpanded ? 'Close' : 'Edit Stores'}
                         </button>
-                        <button onClick={() => handleRemoveManager(m.id)} className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-500">
+                        <button
+                          onClick={() => handleRemoveManager(m.id)}
+                          className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-500"
+                        >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </td>
@@ -339,7 +498,9 @@ function ManagersTab() {
                     {isExpanded && (
                       <tr key={`${m.id}-expanded`} className="bg-blue-50/50 border-b border-blue-100">
                         <td colSpan={4} className="px-4 py-4">
-                          <p className="text-xs font-semibold text-gray-600 mb-2">Assign stores to {m.full_name ?? m.email}:</p>
+                          <p className="text-xs font-semibold text-gray-600 mb-2">
+                            Assign stores to {(m as Profile & { full_name?: string }).full_name ?? m.email}:
+                          </p>
                           <div className="flex flex-wrap gap-2">
                             {stores.map((store) => {
                               const isAssigned = assigned.some((s) => (s as Store).id === store.id)
@@ -377,6 +538,7 @@ function UsersTab() {
   const [stores, setStores] = useState<Store[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
 
   async function fetchData() {
     const [{ data: u }, { data: s }] = await Promise.all([
@@ -400,6 +562,16 @@ function UsersTab() {
     fetchData()
   }
 
+  async function handleDeleteUser(id: string, email: string) {
+    if (!confirm(`Delete user "${email}"? This removes their profile data but not their auth account.`)) return
+    setDeleting(id)
+    const { error } = await supabase.from('profiles').delete().eq('id', id)
+    if (error) { toast.error(error.message); setDeleting(null); return }
+    toast.success('User profile deleted')
+    setDeleting(null)
+    fetchData()
+  }
+
   if (loading) return <div className="skeleton h-40 rounded-xl" />
 
   return (
@@ -412,12 +584,15 @@ function UsersTab() {
               <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase hidden md:table-cell">Email</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Role</th>
               <th className="text-left px-4 py-3 text-xs font-semibold text-gray-500 uppercase hidden lg:table-cell">Store</th>
+              <th className="text-right px-4 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
             </tr>
           </thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id} className="border-b border-gray-50 last:border-0 hover:bg-gray-50">
-                <td className="px-4 py-3 font-medium text-gray-800">{u.full_name ?? '—'}</td>
+                <td className="px-4 py-3 font-medium text-gray-800">
+                  {(u as Profile & { full_name?: string }).full_name ?? '—'}
+                </td>
                 <td className="px-4 py-3 text-gray-500 text-xs hidden md:table-cell">{u.email}</td>
                 <td className="px-4 py-3">
                   <select
@@ -446,6 +621,19 @@ function UsersTab() {
                     <span className="text-gray-400 italic text-xs">N/A</span>
                   )}
                 </td>
+                <td className="px-4 py-3 text-right">
+                  <button
+                    onClick={() => handleDeleteUser(u.id, u.email)}
+                    disabled={deleting === u.id}
+                    className="p-1.5 hover:bg-red-50 rounded text-gray-400 hover:text-red-500 transition-colors"
+                    title="Delete user profile"
+                  >
+                    {deleting === u.id
+                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                      : <Trash2 className="w-4 h-4" />
+                    }
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -467,12 +655,11 @@ function ImportTab() {
   const [storeImporting, setStoreImporting] = useState(false)
   const [managerResults, setManagerResults] = useState<{ row: string[]; success: boolean; message: string }[]>([])
   const [storeResults, setStoreResults] = useState<{ row: string[]; success: boolean; message: string }[]>([])
+  const [managerFile, setManagerFile] = useState<File | null>(null)
+  const [storeFile, setStoreFile] = useState<File | null>(null)
 
   function parseCSV(file: File, onResult: (data: string[][]) => void) {
-    Papa.parse(file, {
-      complete: (result) => onResult(result.data as string[][]),
-      skipEmptyLines: true,
-    })
+    Papa.parse(file, { complete: (result) => onResult(result.data as string[][]), skipEmptyLines: true })
   }
 
   function handleManagerFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -484,9 +671,6 @@ function ImportTab() {
       setManagerFile(file)
     })
   }
-
-  const [managerFile, setManagerFile] = useState<File | null>(null)
-  const [storeFile, setStoreFile] = useState<File | null>(null)
 
   function handleStoreFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -502,7 +686,6 @@ function ImportTab() {
     if (!managerFile) return
     setManagerImporting(true)
     const results: typeof managerResults = []
-
     await new Promise<void>((resolve) => {
       Papa.parse(managerFile, {
         header: true,
@@ -510,7 +693,7 @@ function ImportTab() {
         complete: async (result) => {
           const rows = result.data as Record<string, string>[]
           for (const row of rows) {
-            const email = (row.manager_email ?? row['manager_email'] ?? '').trim().toLowerCase()
+            const email = (row.manager_email ?? '').trim().toLowerCase()
             const storeCode = (row.store_code ?? '').trim().toUpperCase()
             if (!email || !storeCode) {
               results.push({ row: [email, storeCode], success: false, message: 'Missing email or store_code' })
@@ -518,10 +701,13 @@ function ImportTab() {
             }
             const { data: profile } = await supabase.from('profiles').select('id').eq('email', email).single()
             if (!profile) { results.push({ row: [email, storeCode], success: false, message: `User ${email} not found` }); continue }
-            const { data: store } = await supabase.from('stores').select('id').eq('code', storeCode).single()
+            const { data: store } = await supabase.from('stores').select('id').ilike('code', storeCode).single()
             if (!store) { results.push({ row: [email, storeCode], success: false, message: `Store ${storeCode} not found` }); continue }
             await supabase.from('profiles').update({ role: 'area_manager' }).eq('id', profile.id)
-            const { error } = await supabase.from('manager_store_assignments').upsert({ manager_id: profile.id, store_id: store.id }, { onConflict: 'manager_id,store_id' })
+            const { error } = await supabase.from('manager_store_assignments').upsert(
+              { manager_id: profile.id, store_id: store.id },
+              { onConflict: 'manager_id,store_id' },
+            )
             if (error) results.push({ row: [email, storeCode], success: false, message: error.message })
             else results.push({ row: [email, storeCode], success: true, message: 'Assigned ✓' })
           }
@@ -529,7 +715,6 @@ function ImportTab() {
         },
       })
     })
-
     setManagerResults(results)
     setManagerImporting(false)
     const success = results.filter((r) => r.success).length
@@ -561,11 +746,14 @@ function ImportTab() {
     })
     setStoreResults(results)
     setStoreImporting(false)
-    toast.success(`Stores import complete`)
+    toast.success('Stores import complete')
   }
 
   async function exportReturns() {
-    const { data } = await supabase.from('returns').select('*, store:stores(name, code)').order('created_at', { ascending: false })
+    const { data } = await supabase
+      .from('returns')
+      .select('*, store:stores(name, code)')
+      .order('created_at', { ascending: false })
     if (!data) return
     const csv = [
       ['Return #', 'Date', 'Store', 'Supplier', 'Reason', 'Status', 'Created At'],
@@ -578,7 +766,9 @@ function ImportTab() {
         r.status,
         r.created_at,
       ]),
-    ].map((row) => row.map((v) => `"${v}"`).join(',')).join('\n')
+    ]
+      .map((row) => row.map((v) => `"${v}"`).join(','))
+      .join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
@@ -604,9 +794,7 @@ function ImportTab() {
         <div className="p-3 bg-gray-50 rounded-lg">
           <p className="text-sm font-medium text-gray-700 mb-1">Expected CSV format:</p>
           <code className="text-xs text-gray-600 font-mono block">manager_email,store_code</code>
-          <code className="text-xs text-gray-500 font-mono block">sara@talabat.com,TM-MAADI</code>
-          <code className="text-xs text-gray-500 font-mono block">sara@talabat.com,TM-ZAMALEK</code>
-          <p className="text-xs text-gray-400 mt-2">Users must already have accounts. Stores must already exist (use Stores import first).</p>
+          <code className="text-xs text-gray-500 font-mono block">sara@talabat.com,EG_Cairo_DS_1</code>
         </div>
         <input ref={managerFileRef} type="file" accept=".csv" className="hidden" onChange={handleManagerFile} />
         <div className="flex gap-2 flex-wrap">
@@ -643,7 +831,7 @@ function ImportTab() {
         <div className="p-3 bg-gray-50 rounded-lg">
           <p className="text-sm font-medium text-gray-700 mb-1">Expected CSV format:</p>
           <code className="text-xs text-gray-600 font-mono block">code,name,city</code>
-          <code className="text-xs text-gray-500 font-mono block">TM-MAADI,Talabat Mart - Maadi,Cairo</code>
+          <code className="text-xs text-gray-500 font-mono block">EG_Cairo_DS_1,Cairo DS 1,Cairo</code>
         </div>
         <input ref={storeFileRef} type="file" accept=".csv" className="hidden" onChange={handleStoreFile} />
         <div className="flex gap-2 flex-wrap">
