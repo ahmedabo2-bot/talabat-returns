@@ -1,5 +1,6 @@
 'use client'
 
+import { extractFromPdf, type ExtractedReturnData } from '@/lib/pdfExtract'
 import { useState, useEffect, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { Plus, Trash2, Upload, AlertTriangle, ArrowLeft, Loader2, FileIcon, X } from 'lucide-react'
@@ -49,6 +50,8 @@ export default function NewReturnPage() {
   const [proofFiles, setProofFiles] = useState<ProofFile[]>([])
   const [sourceFile, setSourceFile] = useState<File | null>(null)
   const [dragOver, setDragOver] = useState(false)
+  const [extracting, setExtracting] = useState(false)
+  const [extracted, setExtracted] = useState<ExtractedReturnData | null>(null)
 
   useEffect(() => {
     async function load() {
@@ -72,6 +75,43 @@ export default function NewReturnPage() {
     }
     load()
   }, [])
+
+  // PDF auto-extraction when a source PDF is attached
+  useEffect(() => {
+    if (!sourceFile || !sourceFile.name.toLowerCase().endsWith('.pdf')) {
+      setExtracted(null)
+      return
+    }
+    let cancelled = false
+    setExtracting(true)
+    extractFromPdf(sourceFile)
+      .then((data) => {
+        if (cancelled) return
+        setExtracted(data)
+        if (data.returnNumber) setPortalReturnNum(data.returnNumber)
+        if (data.supplierName) setSupplierName(data.supplierName)
+        if (data.storeCode) {
+          const matched = stores.find((s) => s.code === data.storeCode)
+          if (matched) setStoreId(matched.id)
+        }
+        if (data.productName || data.returnedQty || data.totalInclVat) {
+          setSkus([{
+            id: crypto.randomUUID(),
+            sku_code: data.skuCode ?? '',
+            sku_name: data.productName ?? '',
+            quantity: data.returnedQty ?? 1,
+            unit_price: data.totalInclVat
+              ? (data.totalInclVat / (data.returnedQty ?? 1)).toFixed(2)
+              : '',
+          }])
+        }
+        toast.success('Return slip auto-filled from PDF ✓')
+      })
+      .catch(() => { if (!cancelled) toast.error('Could not extract data from PDF') })
+      .finally(() => { if (!cancelled) setExtracting(false) })
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceFile])
 
   function addSku() {
     setSkus((prev) => [...prev, { id: crypto.randomUUID(), sku_code: '', sku_name: '', quantity: 1, unit_price: '' }])
@@ -421,6 +461,19 @@ export default function NewReturnPage() {
             >
               <Upload className="w-4 h-4" /> Upload PDF
             </button>
+          )}
+
+          {sourceFile && extracting && (
+            <div className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-blue-700 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Extracting data from PDF…
+            </div>
+          )}
+          {sourceFile && extracted && !extracting && (
+            <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm text-green-700">
+              <span className="font-medium">Auto-filled from PDF:</span>{' '}
+              {[extracted.returnNumber, extracted.supplierName, extracted.productName].filter(Boolean).join(' · ')}
+            </div>
           )}
           <input ref={sourceInputRef} type="file" accept=".pdf,.png,.jpg,.jpeg" className="hidden" onChange={(e) => setSourceFile(e.target.files?.[0] ?? null)} />
         </div>
